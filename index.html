@@ -64,7 +64,6 @@
       @media (prefers-reduced-motion: reduce) {
         .rays { animation: none; }
       }
-
       .wrap { position: relative; z-index: 1; max-width: 1240px; margin: 0 auto; padding: 18px 16px 40px; }
       header { text-align: center; margin: 6px 0 4px; }
       h1 {
@@ -85,7 +84,16 @@
       .layout.settings-hidden aside { width: 100%; max-width: 640px; margin: 0 auto; }
       #settingsPanel[hidden] { display: none; }
 
-      .settings-bar { display: flex; justify-content: flex-end; margin-top: 2px; }
+      .settings-bar { display: flex; justify-content: flex-end; gap: 8px; margin-top: 2px; }
+      .settings-toggle-btn svg { width: 17px; height: 17px; display: block; }
+      /* fullscreen: the wheel grows to fill the screen */
+      :fullscreen .wrap { max-width: none; min-height: 100dvh; display: flex; flex-direction: column; }
+      :fullscreen header { margin-top: 0; }
+      :fullscreen .layout { flex: 1; align-items: center; width: 100%; }
+      :fullscreen .wheel-zone, :fullscreen .layout.settings-hidden .wheel-zone { width: min(92vw, 72dvh, 880px); max-width: 100%; margin: 0 auto; }
+      :fullscreen .layout { grid-template-columns: minmax(0, 1fr) 372px; }
+      :fullscreen .layout.settings-hidden { grid-template-columns: 1fr; }
+      @media (max-width: 980px) { :fullscreen .layout { grid-template-columns: 1fr; } }
       .settings-toggle-btn {
         font-family: inherit; font-size: 17px; line-height: 1;
         color: var(--ink-dim); background: rgba(255,255,255,0.03);
@@ -132,26 +140,24 @@
       @media (prefers-reduced-motion: reduce) { .bulb { animation: none; } }
 
       /* dart — JS positions it (left/top = tip point), sizes it from the wheel
-         size, and rotates it via --dart-rot so each throw can land at a
-         different angle / distance while the whole dart stays inside the rim */
+         size, and writes its transform directly every frame so each throw can
+         land at a different angle / distance while the whole dart stays
+         inside the rim */
       .dart {
         position: absolute; left: 50%; top: 0;
         width: 84px; margin-left: -42px; margin-top: -133px;
         transform-origin: 50% 100%;
-        --dart-rot: 6deg;
         transform: translate(190px, -190px) rotate(48deg);
         opacity: 0; pointer-events: none; z-index: 5;
         filter: drop-shadow(0 6px 8px rgba(0,0,0,0.5));
       }
-      .dart.fly { transition: transform 0.16s cubic-bezier(0.5, 0, 0.9, 0.4), opacity 0.05s; opacity: 1; transform: translate(0, 0) rotate(var(--dart-rot)); }
-      .dart.stuck { animation: dart-wobble 0.7s ease-out; }
-      @keyframes dart-wobble {
-        0% { transform: translate(0,0) rotate(var(--dart-rot)); }
-        25% { transform: translate(0,0) rotate(calc(var(--dart-rot) + 5deg)); }
-        50% { transform: translate(0,0) rotate(calc(var(--dart-rot) - 4deg)); }
-        75% { transform: translate(0,0) rotate(calc(var(--dart-rot) + 2deg)); }
-        100% { transform: translate(0,0) rotate(var(--dart-rot)); }
-      }
+      /* NOTE: no CSS transition/animation may touch the dart's transform.
+         JS rewrites it every frame once the dart sticks; a transition made
+         each update lag behind the wheel, and a keyframe animation froze
+         the dart's angle at its start value while the tip kept moving —
+         together they made the stuck dart look as if it peeled off the
+         board and then snapped back. Fly-in, wobble and riding with the
+         wheel are all computed in JS (see updateDart). */
 
       .spin-btn {
         margin-top: 26px;
@@ -301,6 +307,10 @@
       </header>
 
       <div class="settings-bar">
+        <button class="settings-toggle-btn" id="fullscreenBtn" type="button" aria-pressed="false" aria-label="全画面で表示">
+          <svg id="fsIconExpand" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M8 3H5a2 2 0 0 0-2 2v3"/><path d="M16 3h3a2 2 0 0 1 2 2v3"/><path d="M8 21H5a2 2 0 0 1-2-2v-3"/><path d="M16 21h3a2 2 0 0 0 2-2v-3"/></svg>
+          <svg id="fsIconShrink" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" style="display:none"><path d="M8 3v3a2 2 0 0 1-2 2H3"/><path d="M21 8h-3a2 2 0 0 1-2-2V3"/><path d="M3 16h3a2 2 0 0 1 2 2v3"/><path d="M16 21v-3a2 2 0 0 1 2-2h3"/></svg>
+        </button>
         <button class="settings-toggle-btn" id="settingsToggleBtn" type="button" aria-expanded="true" aria-controls="settingsPanel" aria-label="設定を隠す"><span aria-hidden="true">⚙️</span></button>
       </div>
 
@@ -389,6 +399,8 @@
         var lastWinner = null;
         var dartAngle = 0;      // screen angle (deg, 0 = top, clockwise) where the dart will land this throw
         var dartFinalRot = 6;   // dart element rotation when stuck
+        var dartDist = 0;       // px distance from wheel centre to the dart tip
+        var dartHitRotation = null; // wheel rotation at the moment the dart sticks (null = not stuck yet)
 
         var wheelSvg = document.getElementById("wheelSvg");
         var wheelZone = document.getElementById("wheelZone");
@@ -418,6 +430,31 @@
         }
         settingsToggleBtn.addEventListener("click", function () { setSettingsVisible(!settingsVisible); });
         hideSettingsBtn.addEventListener("click", function () { setSettingsVisible(false); });
+
+        /* ---------------- fullscreen ---------------- */
+        var fullscreenBtn = document.getElementById("fullscreenBtn");
+        var fsIconExpand = document.getElementById("fsIconExpand");
+        var fsIconShrink = document.getElementById("fsIconShrink");
+        function isFullscreen() { return !!(document.fullscreenElement || document.webkitFullscreenElement); }
+        function syncFullscreenBtn() {
+          var fs = isFullscreen();
+          fullscreenBtn.setAttribute("aria-pressed", fs ? "true" : "false");
+          fullscreenBtn.setAttribute("aria-label", fs ? "全画面を終了" : "全画面で表示");
+          fsIconExpand.style.display = fs ? "none" : "";
+          fsIconShrink.style.display = fs ? "" : "none";
+        }
+        fullscreenBtn.addEventListener("click", function () {
+          if (isFullscreen()) {
+            if (document.exitFullscreen) document.exitFullscreen();
+            else if (document.webkitExitFullscreen) document.webkitExitFullscreen();
+          } else {
+            var root = document.documentElement;
+            if (root.requestFullscreen) root.requestFullscreen();
+            else if (root.webkitRequestFullscreen) root.webkitRequestFullscreen();
+          }
+        });
+        document.addEventListener("fullscreenchange", syncFullscreenBtn);
+        document.addEventListener("webkitfullscreenchange", syncFullscreenBtn);
 
         /* ---------------- audio (all synthesized, no files) ---------------- */
         var actx = null;
@@ -743,18 +780,51 @@
           var radiusFrac = 0.30 + Math.random() * 0.20;       // 30%–50% of the segment radius
           var dist = radiusFrac * (size * R / 400);
           dist = Math.max(minDist, Math.min(dist, Math.max(minDist, maxDist)));
+          dartDist = dist;
+          dartHitRotation = null;
+          dartHitTime = null;
           var rad = dartAngle * Math.PI / 180;
           var tipX = size / 2 + dist * Math.sin(rad);
           var tipY = size / 2 - dist * Math.cos(rad);
           dartEl.style.left = tipX.toFixed(1) + "px";
           dartEl.style.top = tipY.toFixed(1) + "px";
-          dartEl.style.setProperty("--dart-rot", dartFinalRot.toFixed(1) + "deg");
           // start position: further out along the same radial line, angled in
+          // (invisible until the hit moment; updateDart takes over from there)
           var outX = Math.sin(rad) * 210, outY = -Math.cos(rad) * 210;
-          dartEl.style.transition = "none";
           dartEl.style.transform = "translate(" + outX.toFixed(1) + "px, " + outY.toFixed(1) + "px) rotate(" + (dartFinalRot + 48).toFixed(1) + "deg)";
-          void dartEl.offsetWidth;
-          dartEl.style.transition = ""; // hand control back to the .fly transition for the throw
+        }
+        // The dart's position and transform are written ONLY here, once per
+        // frame, from the wheel's current rotation — no CSS transition or
+        // animation ever touches the element (see the note in the CSS).
+        // Fly-in (first 160ms: slide in along the radial line), the landing
+        // wobble (decaying oscillation for ~0.7s after touchdown) and riding
+        // around with the wheel are all derived from the same tip point, so
+        // from the moment it sticks the tip never leaves the board and the
+        // body never lags, freezes or snaps.
+        var dartHitTime = null; // rAF timestamp of the hit moment
+        function updateDart(now) {
+          if (dartHitRotation === null || dartHitTime === null) return;
+          var size = wheelZone.clientWidth || 400;
+          var deltaRot = rotation - dartHitRotation;
+          var angle = dartAngle + deltaRot;
+          var rad = angle * Math.PI / 180;
+          var tipX = size / 2 + dartDist * Math.sin(rad);
+          var tipY = size / 2 - dartDist * Math.cos(rad);
+          dartEl.style.left = tipX.toFixed(1) + "px";
+          dartEl.style.top = tipY.toFixed(1) + "px";
+          var elapsed = now - dartHitTime;
+          var flyP = Math.min(1, elapsed / 160);
+          var flyEase = flyP * flyP * (3 - 2 * flyP); // smoothstep
+          var off = (1 - flyEase) * 210;
+          var offX = Math.sin(rad) * off, offY = -Math.cos(rad) * off;
+          var extraRot = (1 - flyEase) * 48;
+          var wobble = 0;
+          if (flyP >= 1) {
+            var wobT = (elapsed - 160) / 700;
+            if (wobT < 1) wobble = Math.sin(wobT * Math.PI * 3.5) * 5 * Math.pow(1 - wobT, 2);
+          }
+          var rot = dartFinalRot + deltaRot + extraRot + wobble;
+          dartEl.style.transform = "translate(" + offX.toFixed(1) + "px, " + offY.toFixed(1) + "px) rotate(" + rot.toFixed(2) + "deg)";
         }
         function segIndexAt(angle, segs) {
           for (var i = 0; i < segs.length; i++) if (angle >= segs[i].start && angle < segs[i].end) return i;
@@ -774,7 +844,6 @@
           spinning = true;
           lastWinner = null;
           overlay.classList.remove("show");
-          dartEl.classList.remove("fly", "stuck");
           dartEl.style.opacity = "0";
           placeDart();
           spinBtn.disabled = true;
@@ -788,16 +857,31 @@
           // aim inside the middle 56% of the winning segment so the dart never lands on a border
           var margin = winSeg.span * 0.22;
           var targetPoint = winSeg.start + margin + Math.random() * (winSeg.span - margin * 2);
-          // the wheel must turn until the winning point sits exactly where the dart lands
+          // The dart sticks EARLY in the spin (at HIT_T) and then turns WITH
+          // the wheel, so it stays in whatever segment it lands in. The spin
+          // is therefore aligned so the winning point is under the dart at
+          // the moment it sticks, not at the final stop.
+          // Suspense design (requested): after the stick the wheel keeps
+          // spinning hard for roughly two more full turns (~4.7 s), far too
+          // fast to follow which segment the dart is in — reinforced by a
+          // speed-linked motion blur on the wheel and dart (see frame()).
+          // As easeOutCubic bleeds off speed, the blur fades with it, so the
+          // stuck segment gradually becomes readable before the stop.
+          var HIT_T = 0.36;
+          var hitEase = 1 - Math.pow(1 - HIT_T, 3); // eased progress at HIT_T
           var currentMod = ((rotation % 360) + 360) % 360;
           var neededMod = ((dartAngle - targetPoint) % 360 + 360) % 360;
           var delta = ((neededMod - currentMod) % 360 + 360) % 360;
-          var totalDelta = 360 * 5 + delta;         // 5 full turns + alignment
+          var totalDelta = (360 * 5 + delta) / hitEase; // 5 full turns by hit time + alignment
           var startRot = rotation;
-          var duration = 6200;
+          var duration = 7400;
           var startTime = null;
           var lastSegIdx = segIndexAt(pointerAngle(), segs);
           var dartHit = false;
+          var revealPhase = -1; // 0 = too fast to see, 1 = emerging, 2 = nearly stopped
+          var reduceMotion = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+          wheelSvg.style.filter = "";
+          dartEl.style.filter = "";
 
           function frame(now) {
             if (!startTime) startTime = now;
@@ -806,21 +890,49 @@
             rotation = startRot + totalDelta * eased;
             applyRotation();
 
-            var idx = segIndexAt(pointerAngle(), segs);
-            if (idx !== lastSegIdx) { lastSegIdx = idx; playTick(); }
+            if (!dartHit) {
+              var idx = segIndexAt(pointerAngle(), segs);
+              if (idx !== lastSegIdx) { lastSegIdx = idx; playTick(); }
+            }
 
-            if (!dartHit && t >= 0.68) {
+            if (!dartHit && t >= HIT_T) {
               dartHit = true;
+              dartHitRotation = rotation;
+              dartHitTime = now;
               dartEl.style.opacity = "1";
-              dartEl.classList.add("fly");
-              void dartEl.offsetWidth; // let the fly transition pick up the transform change
-              dartEl.style.transform = "translate(0px, 0px) rotate(" + dartFinalRot.toFixed(1) + "deg)";
               playThud();
               wheelZone.classList.remove("shake");
               void wheelZone.offsetWidth;
               wheelZone.classList.add("shake");
-              spinHint.textContent = "ダーツが刺さった！ 結果は…";
-              setTimeout(function () { dartEl.classList.add("stuck"); }, 170);
+              revealPhase = 0;
+              spinHint.textContent = "ダーツが刺さった！ まだ速くて、どこに刺さったか分からない…！";
+            }
+            // from the moment it sticks, the dart rides around with the wheel
+            if (dartHit) {
+              updateDart(now);
+              // Angular speed right now (deg/sec). While it is high, blur the
+              // wheel (and slightly the dart) so the eye cannot lock onto the
+              // stuck segment; the blur is written directly every frame with
+              // no CSS transition, exactly like the dart transform, so it
+              // tracks the speed with no lag. As the speed falls the blur
+              // melts away and the segment — and the dart in it — sharpens
+              // into view.
+              var vel = totalDelta * 3 * Math.pow(1 - t, 2) / duration * 1000;
+              if (!reduceMotion) {
+                var blurAmt = Math.max(0, Math.min(1, (vel - 70) / 480));
+                var wheelBlur = (blurAmt * 2.6).toFixed(2);
+                var dartBlur = (blurAmt * 1.1).toFixed(2);
+                wheelSvg.style.filter = "drop-shadow(0 18px 34px rgba(0,0,0,0.65)) blur(" + wheelBlur + "px)";
+                dartEl.style.filter = vel < 110
+                  ? "drop-shadow(0 0 14px rgba(255,197,66,0.95)) drop-shadow(0 6px 8px rgba(0,0,0,0.5))"
+                  : "drop-shadow(0 6px 8px rgba(0,0,0,0.5)) blur(" + dartBlur + "px)";
+              }
+              var phase = vel >= 320 ? 0 : vel >= 110 ? 1 : 2;
+              if (phase !== revealPhase) {
+                revealPhase = phase;
+                if (phase === 1) spinHint.textContent = "だんだん見えてきた…どこに刺さった！？";
+                else if (phase === 2) spinHint.textContent = "もうすぐ止まる…！";
+              }
             }
 
             if (t < 1) requestAnimationFrame(frame);
@@ -831,6 +943,10 @@
 
         function finishSpin(winSeg) {
           spinning = false;
+          // fully stopped: remove every trace of the speed blur so the
+          // winning segment and the dart in it are perfectly sharp
+          wheelSvg.style.filter = "";
+          dartEl.style.filter = "";
           rotation = ((rotation % 360) + 360) % 360 + 360 * Math.floor(rotation / 360);
           applyRotation();
           lastWinner = winSeg.item;
@@ -845,7 +961,7 @@
           renderSettings();
           playFanfare();
           launchConfetti();
-          setTimeout(function () { overlay.classList.add("show"); }, 550);
+          setTimeout(function () { overlay.classList.add("show"); }, 200);
         }
 
         function renderHistory() {
